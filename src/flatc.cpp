@@ -78,6 +78,10 @@ const Generator generators[] = {
     flatbuffers::IDLOptions::kMAX,
     "Generate PHP files for tables/structs",
     flatbuffers::GeneralMakeRule },
+  { flatbuffers::GenerateSkew,     "-k", "--skew", "Skew",
+    flatbuffers::IDLOptions::kMAX,
+    "Generate Skew code for tables/structs",
+    flatbuffers::SkewMakeRule },
 };
 
 const char *program_name = nullptr;

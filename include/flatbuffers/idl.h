@@ -569,6 +569,13 @@ extern bool GenerateCPP(const Parser &parser,
                         const std::string &path,
                         const std::string &file_name);
 
+// Generate Skew code from the definitions in the Parser object.
+// See idl_gen_skew.
+extern std::string GenerateSkew(const Parser &parser);
+extern bool GenerateSkew(const Parser &parser,
+                         const std::string &path,
+                         const std::string &file_name);
+
 // Generate JavaScript code from the definitions in the Parser object.
 // See idl_gen_js.
 extern std::string GenerateJS(const Parser &parser);
@@ -625,6 +632,12 @@ extern bool GenerateFBS(const Parser &parser,
 extern std::string JSMakeRule(const Parser &parser,
                               const std::string &path,
                               const std::string &file_name);
+
+// Generate a make rule for the generated Skew code.
+// See idl_gen_skew.cpp.
+extern std::string SkewMakeRule(const Parser &parser,
+                                const std::string &path,
+                                const std::string &file_name);
 
 // Generate a make rule for the generated C++ header.
 // See idl_gen_cpp.cpp.

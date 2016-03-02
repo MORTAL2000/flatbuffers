@@ -1,0 +1,587 @@
+namespace FlatBuffers {
+  const FILE_IDENTIFIER_LENGTH = 4
+  const DEFAULT_BUFFER_SIZE = 1024
+  const SIZEOF_SHORT = 2
+  const SIZEOF_INT = 4
+
+  type Offset<T> = int
+
+  class Long {
+    const low int
+    const high int
+
+    def isEqualTo(other Long) bool {
+      return low == other.low && high == other.high
+    }
+  }
+
+  namespace Long {
+    const ZERO = Long.new(0, 0)
+  }
+
+  class Builder {
+    var _bb ByteBuffer
+    var _space int # Remaining space in the ByteBuffer
+    var _minAlign = 1 # Minimum alignment encountered so far
+    var _vtableInUse = 0 # The amount of fields we're actually using
+    var _vtable List<int> = [] # The vtable for the current table
+    var _isNested = false # Whether we are currently serializing a table
+    var _objectStart = 0 # Starting offset of the current struct/table
+    var _vtables List<int> = [] # List of offsets of all vtables
+    var _vectorCount = 0 # For the current vector being built
+    var _forceDefaults = false # False omits default values from the serialized data
+
+    def new(space int) {
+      _bb = ByteBuffer.new(space)
+      _space = space
+    }
+
+    # In order to save space, fields that are set to their default value
+    # don't get serialized into the buffer. Forcing defaults provides a
+    # way to manually disable this optimization.
+    def forceDefaults(value bool) {
+      _forceDefaults = value
+    }
+
+    # Get the ByteBuffer representing the FlatBuffer. Only call this after
+    # you've called "finish". The actual data starts at the ByteBuffer's
+    # current position, not necessarily at 0.
+    def dataBuffer ByteBuffer {
+      return _bb
+    }
+
+    # Get the ByteBuffer representing the FlatBuffer. Only call this after
+    # you've called "finish". The actual data starts at the ByteBuffer's
+    # current position, not necessarily at 0.
+    def asUint8Array Uint8Array {
+      return _bb.bytes.subarray(_bb.position, _bb.position + offset)
+    }
+
+    # Set the current vtable at "voffset" to the current location in the buffer.
+    def slot(voffset int) {
+      _vtable[voffset] = offset
+    }
+
+    def offset int {
+      return _bb.capacity - _space
+    }
+
+    def writeInt8(value int) {
+      _space -= 1
+      _bb.writeInt8(_space, value)
+    }
+
+    def writeInt16(value int) {
+      _space -= 2
+      _bb.writeInt16(_space, value)
+    }
+
+    def writeInt32(value int) {
+      _space -= 4
+      _bb.writeInt32(_space, value)
+    }
+
+    def writeInt64(value Long) {
+      _space -= 8
+      _bb.writeInt64(_space, value)
+    }
+
+    def writeFloat32(value double) {
+      _space -= 4
+      _bb.writeFloat32(_space, value)
+    }
+
+    def writeFloat64(value double) {
+      _space -= 8
+      _bb.writeFloat64(_space, value)
+    }
+
+    def addInt8(value int) {
+      prep(1, 0)
+      writeInt8(value)
+    }
+
+    def addInt16(value int) {
+      prep(2, 0)
+      writeInt16(value)
+    }
+
+    def addInt32(value int) {
+      prep(4, 0)
+      writeInt32(value)
+    }
+
+    def addInt64(value Long) {
+      prep(8, 0)
+      writeInt64(value)
+    }
+
+    def addFloat32(value double) {
+      prep(4, 0)
+      writeFloat32(value)
+    }
+
+    def addFloat64(value double) {
+      prep(8, 0)
+      writeFloat64(value)
+    }
+
+    # Adds on offset, relative to where it will be written
+    def addOffset(value int) {
+      prep(SIZEOF_INT, 0) # Ensure alignment is already done
+      writeInt32(offset - value + SIZEOF_INT)
+    }
+
+    def addFieldInt8(voffset int, value int, defaultValue int) {
+      if _forceDefaults || value != defaultValue {
+        addInt8(value)
+        slot(voffset)
+      }
+    }
+
+    def addFieldInt16(voffset int, value int, defaultValue int) {
+      if _forceDefaults || value != defaultValue {
+        addInt16(value)
+        slot(voffset)
+      }
+    }
+
+    def addFieldInt32(voffset int, value int, defaultValue int) {
+      if _forceDefaults || value != defaultValue {
+        addInt32(value)
+        slot(voffset)
+      }
+    }
+
+    def addFieldInt64(voffset int, value Long, defaultValue Long) {
+      if _forceDefaults || !value.isEqualTo(defaultValue) {
+        addInt64(value)
+        slot(voffset)
+      }
+    }
+
+    def addFieldFloat32(voffset int, value double, defaultValue double) {
+      if _forceDefaults || value != defaultValue {
+        addFloat32(value)
+        slot(voffset)
+      }
+    }
+
+    def addFieldFloat64(voffset int, value double, defaultValue double) {
+      if _forceDefaults || value != defaultValue {
+        addFloat64(value)
+        slot(voffset)
+      }
+    }
+
+    def addFieldOffset(voffset int, value int, defaultValue int) {
+      if _forceDefaults || value != defaultValue {
+        addOffset(value)
+        slot(voffset)
+      }
+    }
+
+    # Structs are stored inline, so nothing additional is being added. "d" is
+    # always 0.
+    def addFieldStruct(voffset int, value int, defaultValue int) {
+      if value != defaultValue {
+        # Structures are always stored inline, they need to be created right
+        # where they're used. You'll get this assertion failure if you
+        # created it elsewhere.
+        assert(value == offset)
+        slot(voffset)
+      }
+    }
+
+    def pad(byteCount int) {
+      for i in 0..byteCount {
+        _bb.writeInt8(--_space, 0)
+      }
+    }
+
+    # Prepare to write an element of "size" after "additionalBytes" have been
+    # written, e.g. if you write a string, you need to align such the int
+    # length field is aligned to 4 bytes, and the string data follows it
+    # directly. If all you need to do is alignment, "additionalBytes" will be
+    # 0.
+    def prep(size int, additionalBytes int) {
+      # Track the biggest thing we've ever aligned to.
+      if size > _minAlign {
+        _minAlign = size
+      }
+
+      # Find the amount of alignment needed such that "size" is properly
+      # aligned after "additionalBytes"
+      var alignSize = ((~(_bb.capacity - _space + additionalBytes)) + 1) & (size - 1)
+
+      # Reallocate the buffer if needed.
+      while _space < alignSize + size + additionalBytes {
+        var old = _bb.capacity
+        _bb.grow
+        _space += _bb.capacity - old
+      }
+
+      pad(alignSize)
+    }
+
+    # Start encoding a new object in the buffer. Users will not usually need to
+    # call this directly. The FlatBuffers compiler will generate helper methods
+    # that call this method internally.
+    def startObject(fieldCount int) {
+      assert(!_isNested)
+      _vtableInUse = fieldCount
+      for i in 0.._vtable.count {
+        _vtable[i] = 0
+      }
+      while _vtable.count < fieldCount {
+        _vtable.append(0)
+      }
+      _isNested = true
+      _objectStart = offset
+    }
+
+    # Finish off writing the object that is under construction.
+    def endObject int {
+      assert(_isNested)
+      addInt32(0)
+      var vtableOffset = offset
+
+      # Write out the current vtable.
+      for i in 0.._vtableInUse {
+        # Offset relative to the start of the table.
+        var entry = _vtable[_vtableInUse - i - 1]
+        addInt16(entry != 0 ? vtableOffset - entry : 0)
+      }
+
+      const standardFields = 2 # The fields below:
+      addInt16(vtableOffset - _objectStart)
+      addInt16((_vtableInUse + standardFields) * SIZEOF_SHORT)
+
+      # Search for an existing vtable that matches the current one.
+      var existingVtable = 0
+      for vtable in _vtables {
+        var vt1 = _bb.capacity - vtable
+        var vt2 = _space
+        var len = _bb.readInt16(vt1)
+        if len == _bb.readInt16(vt2) {
+          var found = false
+          for j = SIZEOF_SHORT; j < len; j += SIZEOF_SHORT {
+            if _bb.readInt16(vt1 + j) != _bb.readInt16(vt2 + j) {
+              found = true
+              break
+            }
+          }
+          if !found {
+            existingVtable = vtable
+            break
+          }
+        }
+      }
+
+      if existingVtable != 0 {
+        # Found a match:
+        # Remove the current vtable.
+        _space = _bb.capacity - vtableOffset
+
+        # Point table to existing vtable.
+        _bb.writeInt32(_space, existingVtable - vtableOffset)
+      } else {
+        # No match:
+        # Add the location of the current vtable to the list of vtables.
+        _vtables.append(offset)
+
+        # Point table to current vtable.
+        _bb.writeInt32(_bb.capacity - vtableOffset, offset - vtableOffset)
+      }
+
+      _isNested = false
+      return vtableOffset
+    }
+
+    def finish(root_table int, file_identifier string) {
+      if file_identifier != null {
+        assert(file_identifier.count == FILE_IDENTIFIER_LENGTH)
+        prep(_minAlign, SIZEOF_INT + FILE_IDENTIFIER_LENGTH)
+        for i in 0..FILE_IDENTIFIER_LENGTH {
+          writeInt8(file_identifier[FILE_IDENTIFIER_LENGTH - 1 - i])
+        }
+      }
+      prep(_minAlign, SIZEOF_INT)
+      addOffset(root_table)
+      _bb.setPosition(_space)
+    }
+
+    # This checks a required field has been set in a given table that has
+    # just been constructed.
+    def requiredField(table int, field int) {
+      if !RELEASE {
+        var tableStart = _bb.capacity - table
+        var vtableStart = tableStart - _bb.readInt32(tableStart)
+        assert(_bb.readInt16(vtableStart + field) != 0)
+      }
+    }
+
+    # Start a new array/vector of objects.  Users usually will not call
+    # this directly. The FlatBuffers compiler will create a start/end
+    # method for vector types in generated code.
+    def startVector(elementSize int, elementCount int, alignment int) {
+      assert(!_isNested)
+      _vectorCount = elementCount
+      prep(SIZEOF_INT, elementSize * elementCount)
+      prep(alignment, elementSize * elementCount) # Just in case alignment > int
+    }
+
+    # Finish off the creation of an array and all its elements. The array must
+    # be created with "startVector".
+    def endVector int {
+      writeInt32(_vectorCount)
+      return offset
+    }
+
+    # Encode the string "s" in the buffer using UTF-8.
+    def createString(s string) Offset<string> {
+      var utf8 List<int> = []
+
+      # Encode UTF-8
+      for codePoint in s.codePoints {
+        if codePoint < 0x80 {
+          utf8.append(codePoint)
+        } else {
+          if codePoint < 0x800 {
+            utf8.append(((codePoint >> 6) & 0x1F) | 0xC0)
+          } else {
+            if codePoint < 0x10000 {
+              utf8.append(((codePoint >> 12) & 0x0F) | 0xE0)
+            } else {
+              utf8.append(((codePoint >> 18) & 0x07) | 0xF0)
+              utf8.append(((codePoint >> 12) & 0x3F) | 0x80)
+            }
+            utf8.append(((codePoint >> 6) & 0x3F) | 0x80)
+          }
+          utf8.append((codePoint & 0x3F) | 0x80)
+        }
+      }
+
+      addInt8(0)
+      startVector(1, utf8.count, 1)
+      _space -= utf8.count
+      _bb.setPosition(_space)
+      var bytes = _bb.bytes
+      var offset = _space
+      for codeUnit in utf8 {
+        bytes[offset] = codeUnit
+        offset++
+      }
+      return endVector as Offset<string>
+    }
+  }
+
+  namespace Builder {
+    def new Builder {
+      return Builder.new(DEFAULT_BUFFER_SIZE)
+    }
+  }
+
+  class ByteBuffer {
+    var _bytes Uint8Array
+    var _view DataView
+    var _position = 0
+
+    def new(bytes Uint8Array) {
+      _bytes = bytes
+      _view = DataView.new(bytes)
+    }
+
+    def new(count int) {
+      _bytes = Uint8Array.new(count)
+      _view = DataView.new(_bytes)
+    }
+
+    def bytes Uint8Array {
+      return _bytes
+    }
+
+    def position int {
+      return _position
+    }
+
+    def setPosition(value int) {
+      _position = value
+    }
+
+    def capacity int {
+      return _bytes.length
+    }
+
+    def readInt8(offset int) int {
+      return _view.getInt8(offset)
+    }
+
+    def readUint8(offset int) int {
+      return _view.getUint8(offset)
+    }
+
+    def readInt16(offset int) int {
+      return _view.getInt16(offset, true)
+    }
+
+    def readUint16(offset int) int {
+      return _view.getUint16(offset, true)
+    }
+
+    def readInt32(offset int) int {
+      return _view.getInt32(offset, true)
+    }
+
+    def readUint32(offset int) int {
+      return _view.getUint32(offset, true)
+    }
+
+    def readInt64(offset int) Long {
+      return Long.new(readInt32(offset), readInt32(offset + 4))
+    }
+
+    def readUint64(offset int) Long {
+      return Long.new(readInt32(offset), readInt32(offset + 4))
+    }
+
+    def readFloat32(offset int) double {
+      return _view.getFloat32(offset, true)
+    }
+
+    def readFloat64(offset int) double {
+      return _view.getFloat64(offset, true)
+    }
+
+    def writeInt8(offset int, value int) {
+      _view.setInt8(offset, value)
+    }
+
+    def writeInt16(offset int, value int) {
+      _view.setInt16(offset, value, true)
+    }
+
+    def writeInt32(offset int, value int) {
+      _view.setInt32(offset, value, true)
+    }
+
+    def writeInt64(offset int, value Long) {
+      writeInt32(offset, value.low)
+      writeInt32(offset + 4, value.high)
+    }
+
+    def writeFloat32(offset int, value double) {
+      _view.setFloat32(offset, value, true)
+    }
+
+    def writeFloat64(offset int, value double) {
+      _view.setFloat64(offset, value, true)
+    }
+
+    def hasIdentifier(identifier string) bool {
+      assert(identifier.count == FILE_IDENTIFIER_LENGTH)
+      for i in 0..FILE_IDENTIFIER_LENGTH {
+        if identifier[i] != readInt8(_position + SIZEOF_INT + i) {
+          return false
+        }
+      }
+      return true
+    }
+
+    # Retrieve the relative offset stored at "offset"
+    def readIndirect(offset int) int {
+      return offset + readInt32(offset)
+    }
+
+    # Get the start of data of a vector whose offset is stored at "offset" in
+    # this object.
+    def readVector(offset int) int {
+      return offset + readInt32(offset) + 4 # data starts after the length
+    }
+
+    # Get the length of a vector whose offset is stored at "offset" in this
+    # object.
+    def readVectorLength(offset int) int {
+      return readInt32(offset + readInt32(offset))
+    }
+
+    # Look up a field in the vtable, return an offset into the object, or 0 if
+    # the field is not present.
+    def readOffset(bb_pos int, vtable_offset int) int {
+      var vtable = bb_pos - readInt32(bb_pos)
+      return vtable_offset < readInt16(vtable) ? readInt16(vtable + vtable_offset) : 0
+    }
+
+    # Initialize any Table-derived type to point to the union at the given offset.
+    def readUnion(offset int) int {
+      return offset + readInt32(offset)
+    }
+
+    # Create a JavaScript string from UTF-8 data stored inside the flatbuffer.
+    # This allocates a new string and converts to wide chars upon each access.
+    def readString(offset int) string {
+      offset += readInt32(offset)
+
+      var length = readInt32(offset)
+      var builder = StringBuilder.new
+      var i = 0
+
+      offset += 4
+
+      while i < length {
+        var codePoint = 0
+
+        # Decode UTF-8
+        var a = readUint8(offset + i)
+        i++
+        if a < 0xC0 {
+          codePoint = a
+        } else {
+          var b = readUint8(offset + i)
+          i++
+          if a < 0xE0 {
+            codePoint =
+              ((a & 0x1F) << 6) |
+              (b & 0x3F)
+          } else {
+            var c = readUint8(offset + i)
+            i++
+            if a < 0xF0 {
+              codePoint =
+                ((a & 0x0F) << 12) |
+                ((b & 0x3F) << 6) |
+                (c & 0x3F)
+            } else {
+              var d = readUint8(offset + i)
+              i++
+              codePoint =
+                ((a & 0x07) << 18) |
+                ((b & 0x3F) << 12) |
+                ((c & 0x3F) << 6) |
+                (d & 0x3F)
+            }
+          }
+        }
+
+        # Encode UTF-16
+        builder.append(string.fromCodePoint(codePoint))
+      }
+
+      return builder.toString
+    }
+
+    # Doubles the size of this ByteBuffer and copies the old data towards
+    # the end of the new buffer (since we build the buffer backwards)
+    def grow {
+      var oldSize = capacity
+      assert((oldSize & 0xC0000000) == 0) # Ensure we don't grow beyond what fits in an int.
+      var newSize = oldSize * 2
+      var bytes = Uint8Array.new(newSize)
+      var position = newSize - oldSize
+      bytes.set(_bytes, position)
+      _bytes = bytes
+      _view = DataView.new(bytes)
+      _position = position
+    }
+  }
+}
